@@ -3,6 +3,13 @@ var http = require('http');
 var Library = require('../server/libraries/libraryModel.js');
 var zlib = require('zlib');
 var Method = require('../server/methods/methodModel.js');
+var google = require('google');
+var _ = require('underscore');
+
+google.resultsPerPage = 3;
+
+var questionIDRegex = /stackoverflow.com\/questions\/(\d+)\//;
+
 
 mongoose.connect('mongodb://localhost/flockdocs'); // connect to mongo database named flockdocs
 
@@ -15,66 +22,97 @@ Method.remove({}).exec().then(function(numRemoved) {
       //TODO scrape official library documentation URL for fresh methods??
       // console.dir(lib);
       lib.methods.forEach(function(method) {
-        var options = {
-          host:'api.stackexchange.com',
-          path:'/2.2/search?page=1&pagesize=3&order=desc&sort=relevance&intitle=' +
-           lib.name + '%20' + method + '&site=stackoverflow&key=ssNWU)nQZdqCIR3kXFf0IA((&filter=!-*f(6rkuau1P',
-          headers: {
-            'Accept-Encoding': 'gzip'
+        
+        google('site:stackoverflow.com ' + lib.name + ' ' + method, function(err, next, links){
+          if (err) console.error(err);
+
+          var questionIDs = [];
+          for (var i = 0; i < links.length; i++) {
+            var questionID = links[i].link.match(questionIDRegex)[1];
+            questionIDs.push(questionID);
           }
-        };
+          console.log(questionIDs);
 
-        http.request(options,function(res) {
-          var gzstream = zlib.createGunzip();
-          res.pipe(gzstream);
+          var options = {
+            host:'api.stackexchange.com',
+            path:'/2.2/questions/' + questionIDs.join(';') + '?pagesize=3&site=stackoverflow&key=ssNWU)nQZdqCIR3kXFf0IA((&filter=!-*f(6rkuau1P',
+            headers: {
+              'Accept-Encoding': 'gzip'
+            }
+          };
+          console.log(path);
 
-          var json = "";
-          gzstream.on('data',function(chunk) {
-            json+= chunk;
-          });
+          http.request(options,function(res) {
+            var gzstream = zlib.createGunzip();
+            res.pipe(gzstream);
 
-          gzstream.on('end', function() {
-            // console.log(json);
-
-            var data = JSON.parse(json);
-            console.log(lib.name + "::" + method);
-            console.log("QUOTA REMAINING:" + data.quota_remaining);
-            // console.dir(data.items[0]);
-
-            //order the answer arrays by score, and restrict them to the top 3 non-negative-scored answers
-            data.items.forEach(function(item) {
-              item.answers.sort(function(a,b) {
-                if(a.score > b.score) {
-                  return -1;
-                } else if (b.score < a.score) {
-                  return 1;
-                } else {
-                  return 0;
-                }
-              });
-
-              item.answers = item.answers.slice(0,3);
-              for (var i = item.answers.length - 1; i >= 0; i--) {
-                if(item.answers[i].score < 0) {
-                  item.answers.pop();
-                }
-              }
+            var json = '';
+            gzstream.on('data',function(chunk) {
+              json+= chunk;
             });
 
+            gzstream.on('end', function() {
+              // console.log(json);
 
-            if(data.items.length) {
-              Method.create({name: method, library: lib.name, topQuestions: data.items}).then(function(doc,err) {
-                if(err){
-                  console.dir(err);
+              var data = JSON.parse(json);
+              console.log(lib.name + '::' + method);
+              console.log('QUOTA REMAINING:' + data.quota_remaining);
+              // console.log(data.items[0].body);
+              // console.log(data.items[0].answers[0]);
+              // console.dir(data.items[0]);
+
+              //order questions by google search results order
+
+              console.log(questionIDs);
+              var sortedQuestions = [];
+              for(var i=0; i<questionIDs.length;i++) {
+                sortedQuestions.push(_.find(data.items,function(item) {
+                  return item.question_id === questionIDs[i];
+                }));
+              }
+
+              data.items = sortedQuestions;
+              console.log(data.items.length);
+
+              console.log(data.items);
+
+              //order the answer arrays by score, and restrict them to the top 3 non-negative-scored answers
+              data.items.forEach(function(item) {
+                item.answers = item.answers || [];
+
+                item.answers.sort(function(a,b) {
+                  if(a.score > b.score) {
+                    return -1;
+                  } else if (b.score < a.score) {
+                    return 1;
+                  } else {
+                    return 0;
+                  }
+                });
+
+                item.answers = item.answers.slice(0,3);
+                for (var i = item.answers.length - 1; i >= 0; i--) {
+                  if(item.answers[i].score < 0) {
+                    item.answers.pop();
+                  }
                 }
               });
-            }
-          });
-        }).end();
+
+
+              if(data.items.length) {
+                Method.create({name: method, library: lib.name, topQuestions: data.items}).then(function(doc,err) {
+                  if(err){
+                    console.dir(err);
+                  }
+                });
+              }
+            });
+          }).end();
 
         //TODO autogenerated question answers... - autogenerate questions?
       
         //followed by updating the data in the mongoDB..
+        });
       });
     });
   });
